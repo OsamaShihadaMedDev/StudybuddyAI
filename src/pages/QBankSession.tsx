@@ -613,6 +613,7 @@ const QBankSession = () => {
   const reviewParam = searchParams.get("review");
 
   const [answerState, setAnswerState] = useState<AnswerState>({ status: "unanswered" });
+  const [submitting, setSubmitting] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [elapsedDisplay, setElapsedDisplay] = useState(0);
   const [lightboxItems, setLightboxItems] = useState<QuestionMedia[]>([]);
@@ -711,18 +712,25 @@ const QBankSession = () => {
     [isReviewing, answerState]
   );
 
-  const handleConfirm = useCallback(() => {
+  const handleConfirm = useCallback(async () => {
     if (answerState.status !== "selected") return;
-    const result = submitAnswer(answerState.pending);
-    if (!result) return;
-    setAnswerState({
-      status: "answered",
-      selected: answerState.pending,
-      correct: result.correct_option,
-      isCorrect: result.is_correct,
-    });
-    setTimeout(() => setDrawerOpen(true), 300);
-  }, [answerState, submitAnswer]);
+    if (submitting) return;
+    const pending = answerState.pending;
+    setSubmitting(true);
+    try {
+      const result = await submitAnswer(pending);
+      if (!result) return;
+      setAnswerState({
+        status: "answered",
+        selected: pending,
+        correct: result.correct_option,
+        isCorrect: result.is_correct,
+      });
+      setTimeout(() => setDrawerOpen(true), 300);
+    } finally {
+      setSubmitting(false);
+    }
+  }, [answerState, submitAnswer, submitting]);
 
   const handleNext = useCallback(async () => {
     setDrawerOpen(false);
@@ -969,10 +977,11 @@ const QBankSession = () => {
               <div className="flex justify-end pt-1 animate-fade-in">
                 <Button
                   onClick={handleConfirm}
+                  disabled={submitting}
                   className="h-10 px-5 rounded-lg font-medium text-sm gap-2"
                 >
                   <CheckCircle className="h-4 w-4" />
-                  Confirm Answer
+                  {submitting ? "Checking…" : "Confirm Answer"}
                 </Button>
               </div>
             )}

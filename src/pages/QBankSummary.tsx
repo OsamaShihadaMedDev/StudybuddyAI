@@ -17,6 +17,36 @@ interface SummaryData {
   flaggedIds: string[];
 }
 
+// Raw shapes returned by the get_session_review RPC (before mapping to app types).
+interface ReviewMedia {
+  file_url: string;
+  media_type: string;
+  caption: string | null;
+  attribution: string | null;
+  license: string;
+  display_context: string;
+  display_order: number;
+}
+
+interface ReviewQuestion {
+  id: string;
+  subject: string;
+  domain: string;
+  topic: string;
+  difficulty: string;
+  competency: string;
+  question_text: string;
+  option_a: string;
+  option_b: string;
+  option_c: string;
+  option_d: string;
+  option_e: string;
+  correct_option: string;
+  explanation: string;
+  teaching_point: string;
+  media: ReviewMedia[] | null;
+}
+
 const ScoreRing = ({ score, total }: { score: number; total: number }) => {
   const pct = total > 0 ? Math.round((score / total) * 100) : 0;
   const radius = 54;
@@ -70,95 +100,66 @@ const QBankSummary = () => {
     const load = async () => {
       if (sessionId) {
         try {
-          const { data: attempts, error } = await supabase
-            .from("user_attempts")
-            .select(`
-              question_id,
-              selected_option,
-              is_correct,
-              time_taken_ms,
-              questions (
-                id, subject, domain, topic, difficulty, competency,
-                question_text, option_a, option_b, option_c, option_d, option_e,
-                correct_option, explanation, teaching_point,
-                question_media (
-                  display_context,
-                  display_order,
-                  caption,
-                  media (
-                    id,
-                    file_url,
-                    media_type,
-                    license,
-                    attribution
-                  )
-                )
-              )
-            `)
-            .eq("session_id", sessionId)
-            .order("attempted_at", { ascending: true });
+          // Answer fields are REVOKE'd from direct table selects; the owner-only
+          // RPC returns the graded questions + attempts for this session.
+          const { data, error } = await supabase.rpc("get_session_review", {
+            p_session: sessionId,
+          });
 
-          const { data: sessionRow } = await supabase
-            .from("qbank_sessions")
-            .select("score, total, total_time_ms, started_at, ended_at")
-            .eq("id", sessionId)
-            .single();
+          if (!error && data) {
+            const review = data as {
+              session: {
+                score: number;
+                total: number;
+                total_time_ms: number;
+                started_at: string;
+                ended_at: string;
+              };
+              attempts: Array<{
+                question_id: string;
+                selected_option: string;
+                is_correct: boolean;
+                time_taken_ms: number | null;
+                question: ReviewQuestion | null;
+              }>;
+              flagged: string[];
+            };
 
-          if (!error && attempts && sessionRow) {
-            const questions = attempts
+            const questions: Question[] = review.attempts
               .map((a) => {
-                const q = a.questions as unknown as any;
+                const q = a.question;
                 if (!q) return null;
-
-                const media: QuestionMedia[] = (q.question_media ?? [])
-                  .sort(
-                    (x: any, y: any) =>
-                      (x.display_order ?? 0) - (y.display_order ?? 0)
-                  )
-                  .map((qm: any) => {
-                    const m = qm.media;
-                    if (!m) return null;
-                    return {
-                      file_url: m.file_url,
-                      media_type: m.media_type,
-                      caption: qm.caption ?? null,
-                      license: m.license ?? null,
-                      attribution: m.attribution ?? null,
-                      display_context: qm.display_context as
-                        | "stem"
-                        | "explanation"
-                        | "both",
-                      display_order: qm.display_order ?? 0,
-                    };
-                  })
-                  .filter(Boolean);
-
+                const media: QuestionMedia[] = (q.media ?? []).map((m: ReviewMedia) => ({
+                  file_url: m.file_url,
+                  media_type: m.media_type,
+                  caption: m.caption ?? null,
+                  license: m.license ?? null,
+                  attribution: m.attribution ?? null,
+                  display_context: m.display_context as
+                    | "stem"
+                    | "explanation"
+                    | "both",
+                  display_order: m.display_order ?? 0,
+                }));
                 return { ...q, media } as Question;
               })
               .filter(Boolean) as Question[];
 
-            const answers: SessionAnswer[] = attempts.map((a) => ({
+            const answers: SessionAnswer[] = review.attempts.map((a) => ({
               question_id: a.question_id,
               selected_option: a.selected_option as SessionAnswer["selected_option"],
               is_correct: a.is_correct,
               time_taken_ms: a.time_taken_ms ?? 0,
             }));
 
-            const { data: flagData } = await supabase
-              .from("flagged_questions")
-              .select("question_id")
-              .eq("session_id", sessionId);
-
-            const flagSet = new Set(
-              (flagData ?? []).map((r: { question_id: string }) => r.question_id)
-            );
+            const flagSet = new Set(review.flagged ?? []);
 
             const loaded = {
               questions,
               answers,
-              totalTime: sessionRow.total_time_ms,
-              score: sessionRow.score,
-              total: sessionRow.total,
+              totalTime: review.session.total_time_ms,
+              score: review.session.score,
+              total: review.session.total,
               flaggedIds: [...flagSet],
             };
             setSummaryData(loaded);
@@ -168,7 +169,7 @@ const QBankSummary = () => {
             return;
           }
         } catch (err) {
-          console.error("Failed to load session from DB, falling back to memory:", err);
+          console.error("Failed to load session review, falling back to memory:", err);
         }
       }
 

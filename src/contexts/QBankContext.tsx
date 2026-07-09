@@ -1,9 +1,9 @@
 import { createContext, useContext, useState, useCallback, useMemo, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/hooks/use-auth";
-import type { Question, QuestionMedia, OptionKey, SessionAnswer, SessionState } from "@/hooks/use-qbank";
+import type { Question, OptionKey, SessionAnswer, SessionState } from "@/hooks/use-qbank";
 
 const STORAGE_KEY = "sb_qbank_session";
 
@@ -35,7 +35,7 @@ interface QBankContextValue {
   isLastQuestion: boolean;
   progress: number;
   startSession: (config?: SessionConfig) => Promise<void>;
-  submitAnswer: (key: OptionKey) => { is_correct: boolean; correct_option: OptionKey } | undefined;
+  submitAnswer: (key: OptionKey) => Promise<{ is_correct: boolean; correct_option: OptionKey } | undefined>;
   nextQuestion: () => void;
   endSession: () => Promise<SessionSummary | null>;
   resetSession: () => void;
@@ -71,9 +71,10 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
   const { data: questionCount = 0 } = useQuery({
     queryKey: ["qbank-count"],
     queryFn: async (): Promise<number> => {
+      // select("id") not "*": answer columns are REVOKE'd, so a `*` count 403s.
       const { count, error } = await supabase
         .from("questions")
-        .select("*", { count: "exact", head: true })
+        .select("id", { count: "exact", head: true })
         .eq("is_active", true);
       if (error) throw error;
       return count ?? 0;
@@ -124,99 +125,6 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
 
   const isFlagLoading = false;
 
-  const fetchQuestions = useCallback(async (config?: SessionConfig): Promise<Question[]> => {
-    let query = supabase
-      .from("questions")
-      .select(
-        "id, subject, domain, topic, difficulty, competency, question_text, option_a, option_b, option_c, option_d, option_e, correct_option, explanation, teaching_point"
-      )
-      .eq("is_active", true);
-
-    if (config?.questionIds && config.questionIds.length > 0) {
-      query = query.in("id", config.questionIds);
-    } else {
-      if (config?.system) {
-        query = query.eq("subject", config.system);
-      }
-      if (config?.domains && config.domains.length > 0) {
-        query = query.in("domain", config.domains);
-      }
-    }
-
-    const { data, error } = await query;
-    if (error) throw error;
-
-    const questions = [...(data ?? [])] as Question[];
-
-    const questionIds = questions.map((q) => q.id);
-
-    if (questionIds.length > 0) {
-      const { data: mediaLinks, error: mediaError } = await supabase
-        .from("question_media")
-        .select(`
-          question_id,
-          display_context,
-          display_order,
-          caption,
-          media (
-            file_url,
-            media_type,
-            attribution,
-            license
-          )
-        `)
-        .in("question_id", questionIds)
-        .order("display_order", { ascending: true });
-
-      if (!mediaError && mediaLinks) {
-        const mediaByQuestion: Record<string, QuestionMedia[]> = {};
-
-        for (const link of mediaLinks as unknown as Array<{
-          question_id: string;
-          display_context: string;
-          display_order: number;
-          caption: string | null;
-          media: {
-            file_url: string;
-            media_type: string;
-            attribution: string | null;
-            license: string;
-          } | null;
-        }>) {
-          const m = link.media;
-          if (!m) continue;
-
-          const item: QuestionMedia = {
-            file_url: m.file_url,
-            media_type: m.media_type,
-            caption: link.caption ?? null,
-            attribution: m.attribution ?? null,
-            license: m.license,
-            display_context: link.display_context as 'stem' | 'explanation' | 'both',
-            display_order: link.display_order,
-          };
-
-          if (!mediaByQuestion[link.question_id]) {
-            mediaByQuestion[link.question_id] = [];
-          }
-          mediaByQuestion[link.question_id].push(item);
-        }
-
-        for (const q of questions) {
-          q.media = mediaByQuestion[q.id] ?? [];
-        }
-      }
-    }
-
-    for (let i = questions.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [questions[i], questions[j]] = [questions[j], questions[i]];
-    }
-
-    const limit = config?.limit ?? 40;
-    return questions.slice(0, Math.min(limit, 40));
-  }, []);
-
   const saveSessionToStorage = useCallback((s: SessionState) => {
     const firstUnanswered = s.questions.findIndex(
       (q) => !s.answers.some((a) => a.question_id === q.id)
@@ -224,6 +132,7 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
     const persistIndex = firstUnanswered === -1 ? s.currentIndex : firstUnanswered;
 
     const payload = {
+      sessionId: s.sessionId,
       questions: s.questions,
       currentIndex: persistIndex,
       answers: s.answers,
@@ -263,18 +172,22 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
       }
 
       if (
+        typeof parsed.sessionId !== "string" ||
         !Array.isArray(parsed.questions) ||
         parsed.questions.length === 0 ||
         typeof parsed.currentIndex !== "number" ||
         !Array.isArray(parsed.answers) ||
         typeof parsed.startedAt !== "number"
       ) {
+        // Missing sessionId => stale pre-server-grading cache; can't resume (the
+        // server session it maps to doesn't exist). Discard.
         localStorage.removeItem(STORAGE_KEY);
         return false;
       }
 
       setReviewIndex(null);
       setSession({
+        sessionId: parsed.sessionId,
         questions: parsed.questions,
         currentIndex: parsed.currentIndex,
         answers: parsed.answers,
@@ -295,9 +208,23 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
 
   const startSession = useCallback(async (config?: SessionConfig) => {
     setReviewIndex(null);
-    const questions = await fetchQuestions(config);
+    const { data, error } = await supabase.rpc("start_qbank_session", {
+      p_domains:
+        config?.domains && config.domains.length > 0 ? config.domains : null,
+      p_limit: config?.limit ?? 40,
+      p_system: config?.system ?? null,
+      p_question_ids:
+        config?.questionIds && config.questionIds.length > 0
+          ? config.questionIds
+          : null,
+    });
+    if (error) throw error;
+
+    const result = data as { session_id: string; questions: Question[] } | null;
+    const questions = (result?.questions ?? []) as Question[];
     const now = Date.now();
     const newSession: SessionState = {
+      sessionId: result?.session_id ?? null,
       questions,
       currentIndex: 0,
       answers: [],
@@ -310,45 +237,65 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
     };
     setSession(newSession);
     saveSessionToStorage(newSession);
-  }, [fetchQuestions, saveSessionToStorage]);
+  }, [saveSessionToStorage]);
 
   const submitAnswer = useCallback(
-    (selectedOption: OptionKey) => {
-      if (!session) return undefined;
+    async (selectedOption: OptionKey) => {
+      if (!session || !session.sessionId) return undefined;
       const question = session.questions[session.currentIndex];
-      const is_correct = selectedOption === question.correct_option;
       const time_taken_ms = Date.now() - session.questionStartedAt;
+
+      // Grade server-side. The answer key never reaches the client until this
+      // returns it for the answered question.
+      const { data, error } = await supabase.rpc("submit_answer", {
+        p_session: session.sessionId,
+        p_question: question.id,
+        p_selected: selectedOption,
+        p_time_ms: time_taken_ms,
+      });
+      if (error || !data) {
+        console.error("submit_answer failed:", error);
+        return undefined;
+      }
+      const graded = data as {
+        is_correct: boolean;
+        correct_option: OptionKey;
+        explanation: string;
+        teaching_point: string;
+      };
+
       const answer: SessionAnswer = {
         question_id: question.id,
         selected_option: selectedOption,
-        is_correct,
+        is_correct: graded.is_correct,
         time_taken_ms,
       };
-      const updatedAnswers = [...session.answers, answer];
-      setSession((prev) =>
-        prev ? { ...prev, answers: updatedAnswers } : null
+
+      // Merge the graded fields onto the cached question so the explanation
+      // panel (which reads displayQuestion.explanation / .correct_option) can
+      // render, and so a resumed/reviewed session shows the answered state.
+      const updatedQuestions = session.questions.map((q) =>
+        q.id === question.id
+          ? {
+              ...q,
+              correct_option: graded.correct_option,
+              explanation: graded.explanation,
+              teaching_point: graded.teaching_point,
+            }
+          : q
       );
 
-      const firstUnanswered = session.questions.findIndex(
-        (q) => !updatedAnswers.some((a) => a.question_id === q.id)
-      );
-      const persistIndex = firstUnanswered === -1 ? session.currentIndex : firstUnanswered;
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          questions: session.questions,
-          currentIndex: persistIndex,
-          answers: updatedAnswers,
-          startedAt: session.startedAt,
-          accumulatedMs: session.accumulatedMs + (Date.now() - session.resumedAt),
-          skippedIds: session.skippedIds,
-          flaggedIds: session.flaggedIds,
-          savedAt: Date.now(),
-        }));
-      } catch { /* fail silently */ }
+      const updatedSession: SessionState = {
+        ...session,
+        questions: updatedQuestions,
+        answers: [...session.answers, answer],
+      };
+      setSession(updatedSession);
+      saveSessionToStorage(updatedSession);
 
-      return { is_correct, correct_option: question.correct_option };
+      return { is_correct: graded.is_correct, correct_option: graded.correct_option };
     },
-    [session]
+    [session, saveSessionToStorage]
   );
 
   const nextQuestion = useCallback(() => {
@@ -368,25 +315,6 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
     }
   }, [session, saveSessionToStorage]);
 
-  const saveAttemptsMutation = useMutation({
-    mutationFn: async (answers: SessionAnswer[]) => {
-      if (!user?.id) throw new Error("Not authenticated");
-      const rows = answers.map((a) => ({
-        user_id: user.id,
-        question_id: a.question_id,
-        selected_option: a.selected_option,
-        is_correct: a.is_correct,
-        time_taken_ms: a.time_taken_ms,
-      }));
-      const { error } = await supabase.from("user_attempts").insert(rows);
-      if (error) throw error;
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["qbank-count"] });
-      queryClient.invalidateQueries({ queryKey: ["qbank-sessions"] });
-    },
-  });
-
   const endSession = useCallback(async () => {
     if (!session) return null;
 
@@ -395,40 +323,21 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
     const total = session.answers.length;
     const totalTime = session.accumulatedMs + (endedAt - session.resumedAt);
 
-    let sessionId: string | null = null;
+    const sessionId = session.sessionId;
 
-    if (user?.id) {
+    // Attempts were already recorded per-answer by submit_answer. Finalize the
+    // session server-side (status + real score/total/time) and record flags.
+    if (sessionId) {
       try {
-        const { data: sessionData, error: sessionError } = await supabase
-          .from("qbank_sessions")
-          .insert({
-            user_id: user.id,
-            started_at: new Date(session.startedAt).toISOString(),
-            ended_at: new Date(endedAt).toISOString(),
-            score,
-            total,
-            total_time_ms: totalTime,
-            system: session.questions[0]?.subject ?? "Cardiovascular",
-          })
-          .select("id")
-          .single();
-
-        if (!sessionError && sessionData) {
-          sessionId = sessionData.id;
+        const { error: endError } = await supabase.rpc("end_qbank_session", {
+          p_session: sessionId,
+        });
+        if (endError) {
+          console.error("end_qbank_session failed:", endError);
+        } else {
           queryClient.invalidateQueries({ queryKey: ["qbank-sessions"] });
 
-          const rows = session.answers.map((a) => ({
-            user_id: user.id,
-            question_id: a.question_id,
-            selected_option: a.selected_option,
-            is_correct: a.is_correct,
-            time_taken_ms: a.time_taken_ms,
-            session_id: sessionId,
-          }));
-
-          await supabase.from("user_attempts").insert(rows);
-
-          if (sessionId && session.flaggedIds.length > 0) {
+          if (session.flaggedIds.length > 0 && user?.id) {
             const flagRows = session.flaggedIds.map((questionId) => ({
               user_id: user.id,
               question_id: questionId,
@@ -436,18 +345,9 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
             }));
             await supabase.from("flagged_questions").insert(flagRows);
           }
-        } else if (session.answers.length > 0) {
-          await saveAttemptsMutation.mutateAsync(session.answers);
         }
       } catch (err) {
-        console.error("Failed to save session to DB:", err);
-        if (session.answers.length > 0) {
-          try {
-            await saveAttemptsMutation.mutateAsync(session.answers);
-          } catch {
-            // already logged
-          }
-        }
+        console.error("Failed to finalize session:", err);
       }
     }
 
@@ -472,7 +372,7 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
     }
 
     return summary;
-  }, [session, user, saveAttemptsMutation, navigate, clearSessionStorage]);
+  }, [session, user, navigate, clearSessionStorage, queryClient]);
 
   const resetSession = useCallback(() => {
     clearSessionStorage();
@@ -497,6 +397,7 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
 
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          sessionId: updated.sessionId,
           questions: updated.questions,
           currentIndex: persistIndex,
           answers: updated.answers,
@@ -569,6 +470,7 @@ export const QBankProvider = ({ children }: { children: ReactNode }) => {
 
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          sessionId: updated.sessionId,
           questions: updated.questions,
           currentIndex: persistIndex,
           answers: updated.answers,
