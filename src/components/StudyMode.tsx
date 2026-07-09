@@ -329,7 +329,7 @@ interface ExplainPanelProps {
 
 export const ExplainPanel = ({ open, scope, card, onClose }: ExplainPanelProps) => {
   const { toast } = useToast();
-  const { isSheetLimited, incrementSheet } = useUsageLimit();
+  const { isSheetLimited } = useUsageLimit();
   const [output, setOutput] = useState("");
   const [loading, setLoading] = useState(false);
   const [started, setStarted] = useState(false);
@@ -360,7 +360,6 @@ export const ExplainPanel = ({ open, scope, card, onClose }: ExplainPanelProps) 
 
     const run = async () => {
       try {
-        await incrementSheet();
         const isCard = scope === "card";
         const body = isCard
           ? {

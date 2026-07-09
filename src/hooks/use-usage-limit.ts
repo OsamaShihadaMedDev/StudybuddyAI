@@ -5,8 +5,6 @@ import { useAuth } from "@/hooks/use-auth";
 export const MAX_DAILY_SHEETS = 5;
 export const MAX_DAILY_CARDS = 5;
 
-type UsageKind = "sheet" | "cards";
-
 interface ProfileRow {
   is_pro: boolean;
   pro_expires_at: string | null;
@@ -68,24 +66,12 @@ export function useUsageLimit() {
   const isSheetLimited = sheetCount >= MAX_DAILY_SHEETS && !isProUser;
   const isCardsLimited = cardsCount >= MAX_DAILY_CARDS && !isProUser;
 
-  const increment = async (kind: UsageKind) => {
-    if (!userId) return;
-    const current =
-      kind === "sheet" ? sheetCount : cardsCount;
-    const { error } = await supabase
-      .from("usage_records")
-      .upsert(
-        {
-          user_id: userId,
-          kind,
-          usage_date: today,
-          count: current + 1,
-        },
-        { onConflict: "user_id,kind,usage_date" }
-      );
-    if (error) throw error;
-    await queryClient.invalidateQueries({ queryKey: ["usage", userId, today] });
-  };
+  // Counts are now incremented server-side (medical-notes edge fn via the
+  // consume_usage RPC); the client no longer writes usage_records. `refresh`
+  // re-reads today's counts so the display reflects the server-side increment
+  // after a successful generation.
+  const refresh = () =>
+    queryClient.invalidateQueries({ queryKey: ["usage", userId, today] });
 
   return {
     sheetCount,
@@ -94,7 +80,6 @@ export function useUsageLimit() {
     isCardsLimited,
     isProUser: !!isProUser,
     isLoading: profileQuery.isLoading || usageQuery.isLoading,
-    incrementSheet: () => increment("sheet"),
-    incrementCards: () => increment("cards"),
+    refresh,
   };
 }

@@ -339,7 +339,7 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
     });
   };
 
-  const { sheetCount, isSheetLimited, isProUser: pro, incrementSheet } = useUsageLimit();
+  const { sheetCount, isSheetLimited, isProUser: pro, refresh: refreshUsage } = useUsageLimit();
   const { premiumRemaining, isPremiumHookActive } = usePremiumHook();
   const { preferredModel, setPreferredModel, saving: modelSaving } = useModelPreference();
   const { user, isAnonymous } = useAuth();
@@ -375,8 +375,6 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
     }, 80);
 
     try {
-      await incrementSheet();
-
       const response = await callMedicalNotes({
         notes: activeNotes,
         difficulty,
@@ -399,8 +397,14 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}));
+        if (response.status === 429) {
+          throw new Error("You've reached today's free limit. It resets at midnight UTC.");
+        }
         throw new Error(err.error || `Error: ${response.status}`);
       }
+
+      // Usage was incremented server-side; refresh the displayed count.
+      refreshUsage();
 
       const reader = response.body?.getReader();
       if (!reader) throw new Error("No response body");

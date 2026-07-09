@@ -514,31 +514,91 @@ Start your response with { and end with }. Nothing else.`;
 
     console.log("[MODEL_USED]:", model, "| isPremium:", isPremiumGeneration);
 
-    const response = await fetch(
-      "https://openrouter.ai/api/v1/chat/completions",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
-          "HTTP-Referer": "https://studybuddy.app",
-          "X-Title": "StudyBuddy",
-        },
-        body: JSON.stringify({
-          model,
-          stream: true,
-          temperature: 0.7,
-          max_tokens: 8192,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userContent },
-          ],
-          ...providerRouting,
-        }),
+    // ── SERVER-SIDE DAILY QUOTA ────────────────────────────────────────────
+    // Sheets and cards count toward the free/anon daily cap; explain and enhance
+    // do not. Pro users are uncapped (determined server-side, not from the body).
+    // Consume before calling OpenRouter; refund below if the upstream call fails
+    // so failed generations never burn quota.
+    const DAILY_CAP = 5;
+    const quotaEligible = !explainMode && !enhanceMode;
+    const usageKind = cardsOnly ? "cards" : "sheet";
+    let quotaConsumed = false;
+
+    if (quotaEligible) {
+      const { data: proProfile } = await authClient
+        .from("profiles")
+        .select("is_pro, pro_expires_at")
+        .eq("id", user.id)
+        .maybeSingle();
+      const isProUser =
+        proProfile?.is_pro === true &&
+        (proProfile.pro_expires_at === null ||
+          new Date(proProfile.pro_expires_at) > new Date());
+
+      if (!isProUser) {
+        const { data: consumeResult, error: consumeError } = await authClient.rpc(
+          "consume_usage",
+          { p_user: user.id, p_kind: usageKind, p_cap: DAILY_CAP }
+        );
+        if (consumeError) {
+          console.error("consume_usage failed:", consumeError);
+          return new Response(
+            JSON.stringify({ error: "quota_check_failed" }),
+            { status: 500, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        if (!consumeResult?.allowed) {
+          return new Response(
+            JSON.stringify({ error: "quota_exceeded" }),
+            { status: 429, headers: { ...corsHeaders, "Content-Type": "application/json" } }
+          );
+        }
+        quotaConsumed = true;
       }
-    );
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(
+        "https://openrouter.ai/api/v1/chat/completions",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${OPENROUTER_API_KEY}`,
+            "HTTP-Referer": "https://studybuddy.app",
+            "X-Title": "StudyBuddy",
+          },
+          body: JSON.stringify({
+            model,
+            stream: true,
+            temperature: 0.7,
+            max_tokens: 8192,
+            messages: [
+              { role: "system", content: systemPrompt },
+              { role: "user", content: userContent },
+            ],
+            ...providerRouting,
+          }),
+        }
+      );
+    } catch (fetchErr) {
+      // Network failure reaching OpenRouter — refund and rethrow to the 500 handler.
+      if (quotaConsumed) {
+        try {
+          await authClient.rpc("refund_usage", { p_user: user.id, p_kind: usageKind });
+        } catch { /* best effort */ }
+      }
+      throw fetchErr;
+    }
 
     if (!response.ok) {
+      // Upstream failure — refund the consumed unit so it doesn't burn quota.
+      if (quotaConsumed) {
+        try {
+          await authClient.rpc("refund_usage", { p_user: user.id, p_kind: usageKind });
+        } catch { /* best effort */ }
+      }
       if (response.status === 429) {
         return new Response(
           JSON.stringify({ error: "Rate limit exceeded. Please try again in a moment." }),
