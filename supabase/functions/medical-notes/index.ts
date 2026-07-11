@@ -122,13 +122,12 @@ HARD RULES:
 - No numbering. No headers between cards. No explanations.
 - Mix clinical vignettes and concept recall cards.`;
 
-    const gptOssSheetPrompt = `You are a senior medical educator and USMLE question writer. Generate a high-yield, exam-ready study sheet that reads like it was written by an experienced clinician — rich, precise, and immediately useful.
-
-Mode: ${mode} | Difficulty: ${diff} | Focus: ${foc} | Length: ${len}
-
-Before writing anything: identify the core medical concept from the input, reason through the highest-yield facts a student needs for exams and clinical practice, then generate the full output below.
-
-FORMATTING RULES (non-negotiable):
+    // ── SHARED SHEET OUTPUT CONTRACT ───────────────────────────────────────
+    // Identical JSON schema + length gate + emoji set appended by BOTH model
+    // families. Defined once here; the only per-family difference is the
+    // preamble (gptOss = terse; haiku = explicit input/mode/focus rules).
+    // (Step 1 of feature 02 — Persona Tiers.)
+    const sheetSchemaBlock = `FORMATTING RULES (non-negotiable):
 - Return ONLY a valid JSON object. No markdown fences, no preamble, no
   commentary, no text before or after the JSON.
 - Use **double asterisks** inside string values to bold key terms in the
@@ -201,6 +200,14 @@ EMOJI OPTIONS:
 🧫 micro, ⚗️ biochem, 🩹 trauma, 🛡️ immunology
 
 Start your response with { and end with }. Nothing else.`;
+
+    const gptOssSheetPrompt = `You are a senior medical educator and USMLE question writer. Generate a high-yield, exam-ready study sheet that reads like it was written by an experienced clinician — rich, precise, and immediately useful.
+
+Mode: ${mode} | Difficulty: ${diff} | Focus: ${foc} | Length: ${len}
+
+Before writing anything: identify the core medical concept from the input, reason through the highest-yield facts a student needs for exams and clinical practice, then generate the full output below.
+
+${sheetSchemaBlock}`;
 
     // ── HAIKU 4.5 PROMPTS (Claude-native, based on GPT-OSS with input normalization) ──
 
@@ -344,79 +351,7 @@ LENGTH RULES:
 - Moderate: balanced detail, cover all sections adequately.
 - Detailed: expand every section fully, include edge cases and nuances.
 
-FORMATTING RULES (non-negotiable):
-- Return ONLY a valid JSON object. No markdown fences, no preamble, no
-  commentary, no text before or after the JSON.
-- Use **double asterisks** inside string values to bold key terms in the
-  overview and clinicalApproach fields. The renderer handles this.
-- Use arrows (→) inside string values to show clinical flow.
-- Numbered list items inside array fields: do NOT include the leading
-  number (e.g. "1."). Each array element is already one item.
-
-OUTPUT — return exactly this JSON shape:
-
-{
-  "topicEmoji": "<one emoji matching the topic>",
-  "topic": "<normalized topic name, e.g. Heart Failure — plain text, no emoji>",
-  "overview": "<pathophysiology-first conceptual foundation. MANDATORY STRUCTURE — each sub-section on its own line using \\n before the label. Exact format:\\nMechanism: **Bold the core defect** — one sentence on the cellular or molecular trigger.\\nPathophysiology: 2-3 sentences tracing how that defect produces the clinical syndrome. Use arrows → to show flow. Bold **key mechanisms**.\\nKey associations:\\n1. **Buzzword** → why it occurs mechanistically\\n2. **Classic presentation** → the mechanism behind it\\n3. **High-yield link** → pathophysiologic explanation\\nSTRICT RULES: NO drug names. NO diagnostic criteria (no 'gold standard is...'). NO management steps. NO investigations. Those belong in Clinical Approach only. Each label starts after a \\n. Do NOT merge into one paragraph.>",
-  "memoryHooks": [
-    "<mnemonic one-liner 1>",
-    "<mnemonic one-liner 2>",
-    "<mnemonic one-liner 3>"
-  ],
-  "clinicalApproach": "<Complete clinical decision section — this is the ONLY section with diagnostic criteria, drug names, and management steps. MANDATORY STRUCTURE — each sub-section on its own line using \\n before the label. Exact format:\\nDiagnosis: Gold standard → what it shows. Key distinguishing findings.\\nWorkup: what to order and why — labs, imaging, scores.\\nManagement:\\nFirst-line → drug + dose rationale.\\nSecond-line → when and why to escalate.\\nDefinitive → surgical or specialist triggers.\\nComplications: what goes wrong if undertreated — bold **the dangerous ones**.\\nAvoid: interventions or drugs contraindicated in this condition.\\nBe complete here — do not hold back detail. This section should be the most clinically dense section on the sheet.>",
-  "keyPoints": [
-    "<If X → think Y one-liner 1>",
-    "<If X → think Y one-liner 2>"
-  ],
-  "examTraps": [
-    "<trap one-liner 1>",
-    "<trap one-liner 2>"
-  ],
-  "flashcards": [
-    {
-      "tag": "Next Step",
-      "question": "<full vignette question text>",
-      "answer": "<1-2 sentence answer>"
-    }
-  ],
-  "referenceNote": "${referenceNote}"
-}
-
-LENGTH GATE — apply strictly based on the Length setting "${len}":
-
-If Length is "Concise":
-- overview: Mechanism (1 sentence) + Pathophysiology (2 sentences) + Key associations (max 3 items). No more.
-- clinicalApproach: Diagnosis (1-2 sentences, gold standard only) + Management (first-line only, 1-2 sentences) + Complications (max 2 items). Omit Workup, Second-line, Definitive, Avoid sections entirely.
-- memoryHooks: exactly 3 items
-- keyPoints: exactly 5 items
-- examTraps: exactly 3 items
-- flashcards: exactly 3 items, mix: 1x Next Step, 1x Diagnosis, 1x Mechanism. All clinical vignettes.
-
-If Length is "Moderate":
-- overview: Mechanism (1 sentence) + Pathophysiology (2-3 sentences) + Key associations (max 4 items).
-- clinicalApproach: all subsections at moderate depth, no padding.
-- memoryHooks: 3-4 items
-- keyPoints: 6-8 items
-- examTraps: 4 items
-- flashcards: exactly 4 items, mix: 1x Next Step, 1x Diagnosis, 1x Mechanism, 1x Complication. All clinical vignettes.
-
-If Length is "Detailed":
-- overview: Mechanism (1-2 sentences) + Pathophysiology (3-4 sentences) + Key associations (5-6 items).
-- clinicalApproach: all subsections fully expanded, include edge cases and nuances.
-- memoryHooks: 5 items
-- keyPoints: 8-10 items
-- examTraps: 5-6 items
-- flashcards: exactly 5 items, mix: 2x Next Step, 1x Diagnosis, 1x Mechanism, 1x Complication. All clinical vignettes.
-
-These are HARD CAPS. Do not exceed them regardless of topic complexity.
-
-EMOJI OPTIONS:
-🫀 cardiac, 🩸 hematology, 🧠 neuro, 🫁 pulmonary, 🦴 ortho, 🩺 general,
-💊 pharmacology, 🧬 genetics, 👁️ ophthalmology, 🤰 OB/GYN, 👶 pediatrics,
-🧫 micro, ⚗️ biochem, 🩹 trauma, 🛡️ immunology
-
-Start your response with { and end with }. Nothing else.`;
+${sheetSchemaBlock}`;
 
     const userContent = enhanceMode
       ? `Topic: ${enhanceTopic}\nSection: ${sectionKey}\nItem: ${itemText}`
