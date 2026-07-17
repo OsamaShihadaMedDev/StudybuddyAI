@@ -14,6 +14,7 @@ export interface MedicalNotesParams {
   focus?: string;
   length?: string;
   examMode?: string;
+  persona?: "student" | "clinician" | "expert";
   cardsOnly?: boolean;
   cardCount?: number;
   focusCard?: unknown;

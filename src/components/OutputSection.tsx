@@ -489,6 +489,8 @@ function renderArraySection(
   collapsedByAnchor?: Record<string, CollapsedRef[]>,
   onReopen?: (key: string) => void
 ) {
+  if (!Array.isArray(items) || items.length === 0) return null;
+
   return (
     <ol className="space-y-2">
       {items.map((item, i) => {

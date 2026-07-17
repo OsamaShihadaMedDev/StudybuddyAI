@@ -16,6 +16,60 @@ function sanitizeJsonOutput(raw: string): string {
   return cleaned;
 }
 
+/**
+ * Role/tone preamble for the two sheet prompts, selected by persona tier.
+ * Persona changes prompt content and register only — never model routing, and
+ * never the JSON contract in `sheetSchemaBlock`. Unknown values fall back to
+ * "student". (Feature 02 — Persona Tiers.)
+ */
+function personaPreamble(p: string | undefined, mode: string, diff: string, foc: string, len: string): string {
+  const tier = p === "clinician" ? "clinician" : p === "expert" ? "expert" : "student";
+
+  if (tier === "student") {
+    return `You are an enthusiastic and clear medical educator writing for an undergraduate medical student (Year 2–4 equivalent). Your goal is comprehension and retention.
+
+Mode: ${mode} | Difficulty: ${diff} | Focus: ${foc} | Length: ${len}
+
+STUDENT PERSONA RULES:
+- Write for someone building foundational understanding. Prioritise intuition before detail.
+- Memory hooks must be vivid, simple mnemonics or analogies — something that sticks.
+- Pathophysiology in the overview should build mechanistically from first principles (cause → effect → clinical consequence). No assumed knowledge.
+- Clinical approach: explain the reasoning behind each step ("we order this because…"), not just the step itself.
+- Exam traps should highlight common conceptual confusions, not just recall errors.
+- Flashcards should be clear vignettes with unambiguous single answers. Avoid expert-level nuance.
+- Language: plain clinical English. Define jargon on first use. Avoid passive voice.`;
+  }
+
+  if (tier === "clinician") {
+    return `You are a senior clinician writing practical, bedside-ready content for a junior doctor, intern, or final-year student on clinical placement. Your goal is safe, confident clinical decision-making.
+
+Mode: ${mode} | Difficulty: ${diff} | Focus: ${foc} | Length: ${len}
+
+CLINICIAN PERSONA RULES:
+- Lead with what matters at the bedside: recognition, triage, and first decisions.
+- The overview should connect pathophysiology directly to signs and symptoms the clinician will actually see ("this mechanism → this presentation").
+- Clinical approach must be actionable: decision thresholds, drug doses where relevant, when to escalate.
+- Memory hooks should be clinical heuristics or rule-of-thumb shortcuts that a doctor would actually use ("if the JVP is raised and the CXR shows…").
+- Exam traps should reflect real clinical traps, not just exam MCQ traps — what gets junior doctors in trouble on the ward.
+- Flashcards: vignette-style with a clinical decision or next best step as the answer. At least half should be "what do you do next?" stems.
+- Language: confident clinical register. Write as if handing over a patient. Brevity is a virtue.`;
+  }
+
+  // expert
+  return `You are a clinician-scientist writing for an advanced reader: a senior medical student, registrar, or specialist trainee who wants mechanistic depth and nuanced clinical reasoning.
+
+Mode: ${mode} | Difficulty: ${diff} | Focus: ${foc} | Length: ${len}
+
+EXPERT PERSONA RULES:
+- Assume high baseline knowledge. Do not define standard terminology.
+- Overview: pathophysiology at the cellular and molecular level where relevant (receptor subtypes, ion channels, signalling cascades). Include genetic or epidemiological context if high-yield.
+- Clinical approach: include second-line and third-line management, nuanced contraindications, special populations, and when guidelines diverge from evidence.
+- Memory hooks can be more sophisticated: mechanistic analogies, pattern-recognition heuristics, or unusual associations that reveal deeper understanding.
+- Exam traps should surface expert-level distinctions: atypical presentations, rare but important exceptions, classic "wrong answer traps" that catch people who almost know the topic.
+- Flashcards: include at least one card on a subtlety or exception the topic is known for. Vignettes may have layered reasoning.
+- Language: technical and precise. Abbreviations acceptable. Dense is fine — this reader wants substance, not scaffolding.`;
+}
+
 serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
@@ -48,7 +102,8 @@ serve(async (req) => {
 
     const { notes, difficulty, focus, length, examMode, cardsOnly, cardCount, focusCard,
             explainMode, userId, isAnonymous, isPro, preferredModel,
-            enhanceMode, itemText, sectionKey, sectionItems, enhanceTopic } = await req.json();
+            enhanceMode, itemText, sectionKey, sectionItems, enhanceTopic,
+            persona } = await req.json();
 
     if (!notes || typeof notes !== "string" || !notes.trim()) {
       return new Response(
@@ -201,11 +256,9 @@ EMOJI OPTIONS:
 
 Start your response with { and end with }. Nothing else.`;
 
-    const gptOssSheetPrompt = `You are a senior medical educator and USMLE question writer. Generate a high-yield, exam-ready study sheet that reads like it was written by an experienced clinician — rich, precise, and immediately useful.
+    const gptOssSheetPrompt = `${personaPreamble(persona, mode, diff, foc, len)}
 
-Mode: ${mode} | Difficulty: ${diff} | Focus: ${foc} | Length: ${len}
-
-Before writing anything: identify the core medical concept from the input, reason through the highest-yield facts a student needs for exams and clinical practice, then generate the full output below.
+Before writing anything: identify the core medical concept from the input, reason through the highest-yield facts for this persona, then generate the full output below.
 
 ${sheetSchemaBlock}`;
 
@@ -319,9 +372,7 @@ HARD RULES:
 - No numbering. No headers between cards. No explanations.
 - Mix clinical vignettes and concept recall cards.`;
 
-    const haikuSheetPrompt = `You are a senior medical educator and USMLE question writer. Generate a high-yield, exam-ready study sheet that reads like it was written by an experienced clinician — rich, precise, and immediately useful.
-
-Mode: ${mode} | Difficulty: ${diff} | Focus: ${foc} | Length: ${len}
+    const haikuSheetPrompt = `${personaPreamble(persona, mode, diff, foc, len)}
 
 INPUT HANDLING:
 The user input may be one of three types:

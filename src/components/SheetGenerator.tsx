@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { History, Loader2, PenLine, Settings2, Sparkles, Stethoscope, X } from "lucide-react";
+import { BookOpen, Brain, History, Loader2, PenLine, Settings2, Stethoscope, X } from "lucide-react";
 import SectionSkeleton from "@/components/SectionSkeleton";
 import { useToast } from "@/hooks/use-toast";
 import OutputSection, { type CitationState } from "@/components/OutputSection";
@@ -25,6 +25,7 @@ import AuthModal from "@/components/AuthModal";
 import GoProModal from "@/components/GoProModal";
 import { startTopProgress, finishTopProgress } from "@/components/TopProgressBar";
 import { useStudyHistory, type StudyHistoryItem } from "@/hooks/use-study-history";
+import { usePersona, type Persona } from "@/hooks/use-persona";
 import { timeAgo } from "@/lib/utils";
 
 export interface SheetGeneratorPrefill {
@@ -497,9 +498,13 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
     incrementCitation,
   } = useCitationUsage();
   const { saveCards } = useFlashcardDeck();
+  const { persona, setPersona } = usePersona();
 
-  const generate = async (overrideNotes?: string) => {
+  // `overridePersona` lets a persona button generate with the tier just clicked —
+  // `setPersona` state won't have flushed by the time this reads the closure.
+  const generate = async (overrideNotes?: string, overridePersona?: Persona) => {
     const activeNotes = overrideNotes ?? notes;
+    const activePersona = overridePersona ?? persona;
     if (!activeNotes.trim()) {
       toast({ title: "Please enter medical notes", variant: "destructive" });
       return;
@@ -529,6 +534,7 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
         focus,
         length,
         examMode,
+        persona: activePersona,
         userId: user?.id ?? null,
         isAnonymous: isAnonymous ?? false,
         isPro: pro,
@@ -703,10 +709,12 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
     return () => clearInterval(interval);
   }, [loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const handleGenerate = () => {
+  // Persona buttons are the generation trigger — there is no separate submit.
+  const generateWithPersona = (p: Persona) => {
+    setPersona(p);
     setDeckSaved(false);
     setConfigDrawerOpen(false);
-    generate();
+    generate(undefined, p);
   };
 
   const startTopic = (label: string) => {
@@ -1018,42 +1026,137 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
             </div>
           )}
 
-          <button
-            type="button"
-            onClick={handleGenerate}
-            disabled={loading}
-            style={{
-              width: "100%",
-              height: 44,
-              display: "inline-flex",
-              alignItems: "center",
-              justifyContent: "center",
-              gap: 8,
-              borderRadius: "var(--radius-md)",
-              border: "1px solid transparent",
-              background: loading ? "var(--stone-300)" : "var(--fg)",
-              color: "var(--bg)",
-              fontFamily: "var(--font-sans)",
-              fontSize: 14,
-              fontWeight: 500,
-              cursor: loading ? "not-allowed" : "pointer",
-              opacity: loading ? 0.7 : 1,
-              transition: "background var(--dur-micro) var(--ease-out)",
-              marginTop: 4,
-            }}
-          >
-            {loading ? (
-              <>
-                <Loader2 className="animate-spin" style={{ width: 16, height: 16 }} />
-                Generating…
-              </>
-            ) : (
-              <>
-                <Sparkles style={{ width: 15, height: 15 }} />
-                Generate Study Material
-              </>
-            )}
-          </button>
+          {/* ── Persona tier buttons (generation trigger) ── */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+            <label
+              style={{
+                display: "block",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+                fontWeight: 500,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--fg-muted)",
+                marginBottom: 2,
+              }}
+            >
+              Generate as
+            </label>
+
+            {(
+              [
+                {
+                  id: "student" as Persona,
+                  label: "Student",
+                  sub: "Build intuition and memory hooks",
+                  Icon: BookOpen,
+                },
+                {
+                  id: "clinician" as Persona,
+                  label: "Clinician",
+                  sub: "Apply to patient care decisions",
+                  Icon: Stethoscope,
+                },
+                {
+                  id: "expert" as Persona,
+                  label: "Expert",
+                  sub: "Mechanisms, nuance, edge cases",
+                  Icon: Brain,
+                },
+              ] as const
+            ).map(({ id, label, sub, Icon }) => {
+              const active = persona === id;
+              return (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => !loading && generateWithPersona(id)}
+                  disabled={loading}
+                  aria-pressed={active}
+                  style={{
+                    width: "100%",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: "10px 14px",
+                    borderRadius: "var(--radius-md)",
+                    border: active
+                      ? "1px solid var(--accent)"
+                      : "1px solid var(--border)",
+                    background: active ? "var(--accent-soft)" : "var(--bg)",
+                    cursor: loading ? "not-allowed" : "pointer",
+                    opacity: loading ? 0.6 : 1,
+                    transition:
+                      "border-color var(--dur-micro) var(--ease-out), background var(--dur-micro) var(--ease-out)",
+                    textAlign: "left",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (loading || active) return;
+                    e.currentTarget.style.borderColor = "var(--border-strong)";
+                  }}
+                  onMouseLeave={(e) => {
+                    if (loading || active) return;
+                    e.currentTarget.style.borderColor = "var(--border)";
+                  }}
+                >
+                  {/* Icon */}
+                  <span
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      width: 28,
+                      height: 28,
+                      borderRadius: "var(--radius-sm)",
+                      background: active ? "var(--accent)" : "var(--bg-elevated)",
+                      flexShrink: 0,
+                      transition: "background var(--dur-micro) var(--ease-out)",
+                    }}
+                  >
+                    {loading && active ? (
+                      <Loader2
+                        style={{ width: 14, height: 14, color: "var(--bg)" }}
+                        className="animate-spin"
+                      />
+                    ) : (
+                      <Icon
+                        style={{
+                          width: 14,
+                          height: 14,
+                          color: active ? "var(--bg)" : "var(--fg-muted)",
+                        }}
+                      />
+                    )}
+                  </span>
+
+                  {/* Text */}
+                  <span style={{ display: "flex", flexDirection: "column", gap: 1, minWidth: 0 }}>
+                    <span
+                      style={{
+                        fontFamily: "var(--font-sans)",
+                        fontSize: 13,
+                        fontWeight: 500,
+                        color: active ? "var(--accent)" : "var(--fg)",
+                        lineHeight: 1.2,
+                      }}
+                    >
+                      {loading && active ? "Generating…" : label}
+                    </span>
+                    <span
+                      style={{
+                        fontFamily: "var(--font-sans)",
+                        fontSize: 11,
+                        color: "var(--fg-muted)",
+                        lineHeight: 1.3,
+                      }}
+                    >
+                      {sub}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
 
           {recentTopics.length > 0 && (
             <div style={{ paddingTop: 16, borderTop: "1px solid var(--border)", marginTop: 8 }}>
