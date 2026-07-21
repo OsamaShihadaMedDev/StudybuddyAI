@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { BookOpen, Brain, History, Loader2, PenLine, Settings2, Stethoscope, X } from "lucide-react";
-import SectionSkeleton from "@/components/SectionSkeleton";
 import { useToast } from "@/hooks/use-toast";
 import OutputSection, { type CitationState } from "@/components/OutputSection";
 import { useUsageLimit, MAX_DAILY_SHEETS } from "@/hooks/use-usage-limit";
@@ -449,8 +448,8 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
   const [modelUsed, setModelUsed] = useState<"flash" | "gpt-oss" | "claude" | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [deckSaved, setDeckSaved] = useState(false);
-  const [loadingMsg, setLoadingMsg] = useState("");
-  const [pendingOutput, setPendingOutput] = useState<string | null>(null);
+  // Accumulates raw SSE text during streaming; fed to OutputSection live.
+  const [streamText, setStreamText] = useState("");
   // A prefilled topic (e.g. a Roadmap chip) must land in a visible textarea —
   // otherwise the picker renders and silently overwrites it on the next click.
   const [showTextarea, setShowTextarea] = useState(!!prefill?.input);
@@ -518,7 +517,7 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
     setSheet(null);
     setLegacyOutput("");
     setDeckSaved(false);
-    setPendingOutput(null);
+    setStreamText("");
     setShowTextarea(false);
     setCitationState("idle");
     setCitations([]);
@@ -564,18 +563,22 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
       if (!reader) throw new Error("No response body");
 
       const decoder = new TextDecoder();
-      let textBuffer = "";
+      let sseBuffer = "";
       let fullText = "";
+
+      // Reset stream accumulator for this generation
+      setStreamText("");
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        textBuffer += decoder.decode(value, { stream: true });
+
+        sseBuffer += decoder.decode(value, { stream: true });
 
         let newlineIndex: number;
-        while ((newlineIndex = textBuffer.indexOf("\n")) !== -1) {
-          let line = textBuffer.slice(0, newlineIndex);
-          textBuffer = textBuffer.slice(newlineIndex + 1);
+        while ((newlineIndex = sseBuffer.indexOf("\n")) !== -1) {
+          let line = sseBuffer.slice(0, newlineIndex);
+          sseBuffer = sseBuffer.slice(newlineIndex + 1);
 
           if (line.endsWith("\r")) line = line.slice(0, -1);
           if (line.startsWith(":") || line.trim() === "") continue;
@@ -589,16 +592,36 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
             const content = parsed.choices?.[0]?.delta?.content;
             if (content) {
               fullText += content;
+              // Push the raw accumulated text to OutputSection on every token.
+              // parseStoredSheet returns null for partial JSON, which keeps the
+              // sections in their skeleton state until the JSON is parseable.
+              setStreamText(fullText);
             }
           } catch {
-            textBuffer = line + "\n" + textBuffer;
+            sseBuffer = line + "\n" + sseBuffer;
             break;
           }
         }
       }
 
+      // Stream done — do a clean final parse
       const rawText = fullText || "";
-      setPendingOutput(rawText);
+      const cleaned = sanitizeJsonOutput(rawText);
+      try {
+        const finalSheet = JSON.parse(cleaned) as GeneratedSheet;
+        setSheet(finalSheet);
+        setStreamText("");
+        setLegacyOutput("");
+      } catch {
+        setSheet(null);
+        setStreamText("");
+        setLegacyOutput(rawText);
+      }
+
+      // The sheet is committed and authoritative — drop the loading chrome now.
+      // Citations resolve afterwards behind their own CitationBadgeList state,
+      // matching the previous behaviour where loading ended at sheet render.
+      setLoading(false);
 
       // Citation lookup — runs after stream completes
       try {
@@ -624,8 +647,7 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
       }
     } catch (e: any) {
       setLoading(false);
-      setLoadingMsg("");
-      setPendingOutput(null);
+      setStreamText("");
       toast({
         title: "Error",
         description: e.message || "Failed to generate study material",
@@ -657,57 +679,6 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
     return () =>
       window.removeEventListener("studybuddy:enhancement-saved", handleEnhancementSaved);
   }, []);
-
-  useEffect(() => {
-    if (!loading) return;
-
-    const steps = [
-      "Reading topic…",
-      "Structuring notes…",
-      "Finding exam traps…",
-      "Adding memory hooks…",
-      "Finalizing your sheet…",
-    ];
-
-    let currentStep = 0;
-    let allStepsDone = false;
-    setLoadingMsg(steps[0]);
-
-    const interval = setInterval(() => {
-      currentStep += 1;
-
-      if (currentStep < steps.length) {
-        setLoadingMsg(steps[currentStep]);
-      } else {
-        allStepsDone = true;
-        setLoadingMsg(steps[steps.length - 1]);
-      }
-
-      if (allStepsDone) {
-        setPendingOutput((pending) => {
-          if (pending !== null) {
-            clearInterval(interval);
-            const cleaned = sanitizeJsonOutput(pending);
-            try {
-              const parsed = JSON.parse(cleaned) as GeneratedSheet;
-              setSheet(parsed);
-              setLegacyOutput("");
-            } catch {
-              // JSON parse failed — fall back to legacy text renderer
-              setSheet(null);
-              setLegacyOutput(pending);
-            }
-            setLoading(false);
-            setLoadingMsg("");
-            return null;
-          }
-          return pending;
-        });
-      }
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [loading]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persona buttons are the generation trigger — there is no separate submit.
   const generateWithPersona = (p: Persona) => {
@@ -1247,50 +1218,38 @@ const SheetGenerator = ({ prefill }: SheetGeneratorProps) => {
       {/* ── Middle pane: living document (fluid, fills its lane) ── */}
       <div ref={outputRef} className="min-w-0 lg:flex-1 lg:px-8">
       <div className="w-full space-y-6">
-      {loading && !sheet && !legacyOutput && (
-        <div className="space-y-6 animate-fade-in">
-          <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "0 4px" }}>
-            <Loader2
-              className="animate-spin"
-              style={{ width: 14, height: 14, color: "var(--accent)" }}
-            />
-            <p
-              style={{
-                fontFamily: "var(--font-sans)",
-                fontSize: 14,
-                fontWeight: 500,
-                color: "var(--fg)",
-                transition: "all 300ms",
-              }}
-            >
-              {loadingMsg}
-            </p>
-            <p style={{ fontSize: 12, color: "var(--fg-subtle)" }}>
-              Takes a little longer during peak hours — hang tight
-            </p>
-          </div>
-          {/* Document structure forming — skeletons mirror the incoming sections */}
-          <div className="space-y-6">
-            {[0, 1, 2, 3, 4].map((i) => (
-              <div
-                key={i}
-                className="section-reveal"
-                style={{ animationDelay: `${i * 150}ms` }}
-              >
-                <SectionSkeleton variant="sheet-section" />
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
+      {/* Empty state — only when not loading and no output */}
       {!loading && !sheet && !legacyOutput && (
         <SheetsEmptyState onStartTopic={startTopic} onSelectHistory={loadHistoryItem} />
       )}
 
-      {(sheet || legacyOutput) && (
+      {/* Loading header — sits above the cards, so its removal shifts nothing */}
+      {loading && (
+        <div
+          className="animate-fade-in flex items-center gap-2.5"
+          style={{ padding: "0 4px", marginBottom: -8 }}
+        >
+          <Loader2
+            className="animate-spin"
+            style={{ width: 13, height: 13, color: "var(--accent)", flexShrink: 0 }}
+          />
+          <p
+            style={{
+              fontFamily: "var(--font-sans)",
+              fontSize: 13,
+              color: "var(--fg-muted)",
+            }}
+          >
+            Generating your sheet…
+          </p>
+        </div>
+      )}
+
+      {/* OutputSection — mounted from T+0 when loading starts, stays mounted after */}
+      {(loading || sheet || legacyOutput) && (
         <OutputSection
-          output={sheet ? JSON.stringify(sheet) : legacyOutput}
+          output={sheet ? JSON.stringify(sheet) : streamText || legacyOutput}
+          isLoading={loading}
           inputText={notes}
           modeInfo={{ examMode, difficulty, focus, length }}
           citations={citations}
