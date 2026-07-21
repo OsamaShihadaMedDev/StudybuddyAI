@@ -14,6 +14,7 @@ import {
   Zap,
   ChevronDown,
   ChevronUp,
+  Loader2,
   RefreshCw,
   Sparkles,
   RotateCcw,
@@ -158,6 +159,8 @@ export type CitationState = "idle" | "loading" | "found" | "locked" | "hidden";
 
 interface OutputSectionProps {
   output: string;
+  /** While true, sections whose data hasn't streamed in yet render skeletons in-place. */
+  isLoading?: boolean;
   inputText?: string;
   modeInfo?: {
     examMode: string;
@@ -988,8 +991,71 @@ const InlineEnhancement = ({
 
 // ─── Main component ───────────────────────────────────────────────────────
 
+const Bar = ({ w = "w-full", h = "h-3.5" }: { w?: string; h?: string }) => (
+  <div
+    className={`skeleton-shimmer ${h} ${w}`}
+    style={{ borderRadius: "var(--radius-sm)", background: "var(--border)" }}
+  />
+);
+
+/**
+ * Skeleton body for a single section card while its data is in-flight.
+ * Rendered inside the same card chrome as the real content so no layout
+ * shift occurs when the real content arrives.
+ */
+const SectionShimmer = ({ sectionKey }: { sectionKey: string }) => {
+  // Each section has a different expected content shape —
+  // match the shimmer height to roughly what the real content will be.
+  if (sectionKey === "flashcards") {
+    return (
+      <div className="space-y-3">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="space-y-2"
+            style={{
+              padding: "10px 12px",
+              borderRadius: "var(--radius-md)",
+              border: "1px solid var(--border)",
+              background: "var(--bg)",
+            }}
+          >
+            <Bar w="w-16" h="h-3" />
+            <Bar w="w-11/12" h="h-3.5" />
+            <Bar w="w-3/4" h="h-3" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (sectionKey === "memoryHooks" || sectionKey === "keyPoints" || sectionKey === "examTraps") {
+    return (
+      <div className="space-y-2.5">
+        <Bar w="w-11/12" />
+        <Bar w="w-4/5" />
+        <Bar w="w-full" />
+        <Bar w="w-3/4" />
+      </div>
+    );
+  }
+
+  // overview, clinicalApproach, referenceNote — longer prose
+  return (
+    <div className="space-y-2.5">
+      <Bar w="w-full" />
+      <Bar w="w-11/12" />
+      <Bar w="w-4/5" />
+      <Bar w="w-full" />
+      <Bar w="w-2/3" />
+      <Bar w="w-5/6" />
+    </div>
+  );
+};
+
 const OutputSection = ({
   output,
+  isLoading = false,
   inputText,
   modeInfo,
   citations,
@@ -1220,7 +1286,9 @@ const OutputSection = ({
   }, [output]);
 
   // ── Legacy renderer ──────────────────────────────────────────────────────
-  if (!isJson) {
+  // Only for completed non-JSON sheets. While loading we fall through to the
+  // JSON renderer below, which renders every section as an in-place skeleton.
+  if (!isJson && !isLoading) {
     const sections = parseSections(output);
 
     if (sections.length === 0) {
@@ -1368,7 +1436,7 @@ const OutputSection = ({
           key={key}
           enhKey={key}
           enhancement={enh}
-          topic={sheet.topic ?? inputText ?? ""}
+          topic={sheet?.topic ?? inputText ?? ""}
           isPro={isPro}
           userId={userId ?? null}
           isAnonymous={isAnonymous ?? false}
@@ -1388,35 +1456,37 @@ const OutputSection = ({
       onTouchEnd={handleSelectionChange}
     >
       {/* Persistent highlight-to-enhance hint — sticky below the top nav */}
-      <div
-        className="sticky animate-fade-in"
-        style={{
-          top: "var(--nav-h, 64px)",
-          zIndex: 20,
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          borderRadius: "var(--radius-sm)",
-          border: "1px solid var(--border)",
-          background: "color-mix(in srgb, var(--bg) 90%, transparent)",
-          backdropFilter: "blur(10px)",
-          WebkitBackdropFilter: "blur(10px)",
-          padding: "6px 12px",
-          marginBottom: 4,
-        }}
-      >
-        <Sparkles style={{ width: 12, height: 12, color: "var(--accent)", flexShrink: 0 }} />
-        <span
+      {!isLoading && (
+        <div
+          className="sticky animate-fade-in"
           style={{
-            fontFamily: "var(--font-mono)",
-            fontSize: 11,
-            color: "var(--fg-muted)",
-            letterSpacing: "0.02em",
+            top: "var(--nav-h, 64px)",
+            zIndex: 20,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            borderRadius: "var(--radius-sm)",
+            border: "1px solid var(--border)",
+            background: "color-mix(in srgb, var(--bg) 90%, transparent)",
+            backdropFilter: "blur(10px)",
+            WebkitBackdropFilter: "blur(10px)",
+            padding: "6px 12px",
+            marginBottom: 4,
           }}
         >
-          Highlight any text to expand or get a clinical tie
-        </span>
-      </div>
+          <Sparkles style={{ width: 12, height: 12, color: "var(--accent)", flexShrink: 0 }} />
+          <span
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 11,
+              color: "var(--fg-muted)",
+              letterSpacing: "0.02em",
+            }}
+          >
+            Highlight any text to expand or get a clinical tie
+          </span>
+        </div>
+      )}
 
       {/* Mode header + Save */}
       <div className="animate-fade-in flex items-center justify-between">
@@ -1430,12 +1500,20 @@ const OutputSection = ({
         const isReference = key === "referenceNote";
         const showEvidenceBadge = citationState === "found" && config.evidenceBacked;
 
-        const copyText =
-          key === "flashcards"
-            ? sheet.flashcards.map((c) => `Q: [${c.tag}] ${c.question}\nA: ${c.answer}`).join("\n\n")
-            : Array.isArray(sheet[key])
-            ? (sheet[key] as string[]).map((item, i) => `${i + 1}. ${item}`).join("\n")
-            : (sheet[key] as string) ?? "";
+        // During loading, a section is "ready" when its field exists on the sheet.
+        // Before the stream starts (sheet === null) or while the field is still
+        // in-flight, render the skeleton body in place — same chrome, same height.
+        const fieldValue = sheet ? (sheet as Record<string, unknown>)[key] : undefined;
+        const sectionReady = fieldValue !== undefined && fieldValue !== null;
+        const showSkeleton = isLoading && !sectionReady;
+
+        const copyText = sectionReady
+          ? key === "flashcards"
+            ? sheet!.flashcards.map((c) => `Q: [${c.tag}] ${c.question}\nA: ${c.answer}`).join("\n\n")
+            : Array.isArray(sheet![key])
+            ? (sheet![key] as string[]).map((item, i) => `${i + 1}. ${item}`).join("\n")
+            : (sheet![key] as string) ?? ""
+          : "";
 
         return (
           <div
@@ -1445,6 +1523,11 @@ const OutputSection = ({
             className="animate-fade-in scroll-mt-20"
             style={{
               ...SECTION_CARD_STYLE,
+              // Crossfade: skeleton→content is a pure opacity transition on the
+              // body — the card chrome (border, background, header) stays stable.
+              // The fade-in class is kept unconditional so it plays once on mount
+              // and does NOT re-trigger when the body swaps skeleton→content.
+              transition: "opacity 200ms var(--ease-out)",
               animationDelay: `${idx * 200}ms`,
               animationFillMode: "backwards",
             }}
@@ -1452,39 +1535,51 @@ const OutputSection = ({
             <div style={SECTION_HEADER_STYLE}>
               <div className="flex items-center gap-2.5 flex-wrap">
                 <div style={SECTION_ICON_STYLE}>
-                  <Icon style={{ width: 14, height: 14, color: "var(--accent)" }} />
+                  {showSkeleton ? (
+                    <Loader2
+                      className="animate-spin"
+                      style={{ width: 14, height: 14, color: "var(--accent)" }}
+                    />
+                  ) : (
+                    <Icon style={{ width: 14, height: 14, color: "var(--accent)" }} />
+                  )}
                 </div>
                 <h3 style={SECTION_TITLE_STYLE}>
                   {config.label}
-                  {key === "overview" && sheet.topicEmoji && (
+                  {key === "overview" && sheet?.topicEmoji && (
                     <span className="ml-2 text-base">{sheet.topicEmoji}</span>
                   )}
                 </h3>
                 {showEvidenceBadge && <EvidenceBadge onClick={scrollToReference} />}
-                {key === "overview" && modelUsed && (
+                {key === "overview" && modelUsed && !showSkeleton && (
                   <ModelBadge model={modelUsed} isPro={isPro} />
                 )}
               </div>
               <div className="flex items-center gap-1">
-                <Check
-                  aria-label="Section loaded"
-                  className="h-3.5 w-3.5 text-primary/50 animate-fade-in"
-                  style={{ animationDelay: `${idx * 200 + 350}ms`, animationFillMode: "backwards" }}
-                />
-                {key !== "referenceNote" && key !== "flashcards" && (
-                  <RegenerateButton sectionKey={key} />
+                {!showSkeleton && (
+                  <>
+                    <Check
+                      aria-label="Section loaded"
+                      className="h-3.5 w-3.5 text-primary/50 animate-fade-in"
+                    />
+                    {key !== "referenceNote" && key !== "flashcards" && (
+                      <RegenerateButton sectionKey={key} />
+                    )}
+                    <CopyButton text={copyText} />
+                  </>
                 )}
-                <CopyButton text={copyText} />
               </div>
             </div>
 
             <div style={SECTION_BODY_STYLE} data-enh-section={key}>
-              {key === "flashcards" ? (
-                <FlashcardsSection cards={sheet.flashcards} />
+              {showSkeleton ? (
+                <SectionShimmer sectionKey={key} />
+              ) : key === "flashcards" ? (
+                <FlashcardsSection cards={sheet!.flashcards} />
               ) : key === "overview" || key === "clinicalApproach" ? (
                 <div className="text-sm text-muted-foreground leading-relaxed">
                   {renderJsonText(
-                    sheet[key] as string,
+                    sheet![key] as string,
                     key,
                     handleKeywordClick,
                     renderInline,
@@ -1495,7 +1590,7 @@ const OutputSection = ({
               ) : key === "referenceNote" ? (
                 <>
                   <div className="text-sm text-muted-foreground leading-relaxed">
-                    {sheet.referenceNote}
+                    {sheet!.referenceNote}
                   </div>
                   {citationState && citationState !== "idle" && citationState !== "hidden" && (
                     <div className="mt-3">
@@ -1510,14 +1605,14 @@ const OutputSection = ({
                 </>
               ) : (
                 renderArraySection(
-                  sheet[key] as string[],
+                  sheet![key] as string[],
                   key,
                   renderInline,
                   collapsedByAnchor,
                   reopenEnhancement
                 )
               )}
-              {renderInline(`${key}:end`)}
+              {!showSkeleton && renderInline(`${key}:end`)}
             </div>
           </div>
         );
